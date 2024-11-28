@@ -39,7 +39,7 @@
         (>= (- block-height deposit-height) HOLDING-PERIOD)))
 
 (define-private (calculate-dividend-share (holder principal) (total-dividend uint))
-    (let ((holder-balance (default-to u0 (map-get? balances {holder: holder}))))
+    (let ((holder-balance (default-to u0 (map-get? balances holder))))
         (/ (* holder-balance total-dividend) (var-get total-supply))))
 
 ;; Public Functions
@@ -56,16 +56,19 @@
     (begin
         (asserts! (not (var-get paused)) ERR-PAUSED)
         (asserts! (is-eq tx-sender sender) ERR-NOT-AUTHORIZED)
-        (asserts! (>= (default-to u0 (map-get? balances {holder: sender})) amount) ERR-INVALID-AMOUNT)
+        (asserts! (>= (default-to u0 (map-get? balances sender)) amount) ERR-INVALID-AMOUNT)
+        ;; Add recipient validation
+        (asserts! (not (is-eq recipient sender)) ERR-INVALID-AMOUNT)
+        (asserts! (is-valid-principal recipient) ERR-INVALID-AMOUNT)
         
         ;; Update balances
         (map-set balances
-            {holder: sender}
-            (- (default-to u0 (map-get? balances {holder: sender})) amount))
+            sender
+            (- (default-to u0 (map-get? balances sender)) amount))
         
         (map-set balances
-            {holder: recipient}
-            (+ (default-to u0 (map-get? balances {holder: recipient})) amount))
+            recipient
+            (+ (default-to u0 (map-get? balances recipient)) amount))
         
         ;; Update deposit height for large transfers
         (if (>= amount TRANSFER-DELAY-THRESHOLD)
@@ -73,6 +76,12 @@
             true)
         
         (ok true)))
+
+;; Helper function to validate principal
+(define-private (is-valid-principal (principal principal))
+    (match (principal-destruct? principal)
+        success true
+        error false))
 
 ;; Deposit Revenue
 (define-public (deposit-revenue)
@@ -102,20 +111,23 @@
 ;; Claim Dividends
 (define-public (claim-dividends (snapshot-id uint))
     (let ((holder tx-sender)
-          (dividend-amount (default-to u0 (map-get? dividends-earned {holder: holder, snapshot-id: snapshot-id}))))
-        (begin
-            (asserts! (not (var-get paused)) ERR-PAUSED)
-            (asserts! (> dividend-amount u0) ERR-NO-DIVIDENDS)
-            (asserts! (not (default-to false (map-get? claimed-dividends {holder: holder, snapshot-id: snapshot-id}))) ERR-NO-DIVIDENDS)
-            (asserts! (check-holding-period holder) ERR-NOT-AUTHORIZED)
-            
-            ;; Mark dividends as claimed
-            (map-set claimed-dividends {holder: holder, snapshot-id: snapshot-id} true)
-            
-            ;; Transfer dividends
-            (as-contract
-                (stx-transfer? dividend-amount tx-sender holder))
-            (ok true))))
+          (current-id (var-get current-snapshot-id)))
+        ;; Add snapshot-id validation
+        (asserts! (<= snapshot-id current-id) ERR-INVALID-AMOUNT)
+        (let ((dividend-amount (default-to u0 (map-get? dividends-earned {holder: holder, snapshot-id: snapshot-id}))))
+            (begin
+                (asserts! (not (var-get paused)) ERR-PAUSED)
+                (asserts! (> dividend-amount u0) ERR-NO-DIVIDENDS)
+                (asserts! (not (default-to false (map-get? claimed-dividends {holder: holder, snapshot-id: snapshot-id}))) ERR-NO-DIVIDENDS)
+                (asserts! (check-holding-period holder) ERR-NOT-AUTHORIZED)
+                
+                ;; Mark dividends as claimed
+                (map-set claimed-dividends {holder: holder, snapshot-id: snapshot-id} true)
+                
+                ;; Transfer dividends and handle the response
+                (let ((transfer-result (as-contract (stx-transfer? dividend-amount tx-sender holder))))
+                    (asserts! (is-ok transfer-result) ERR-INVALID-AMOUNT)
+                    (ok dividend-amount))))))
 
 ;; Emergency Functions
 (define-public (pause-protocol)
@@ -132,7 +144,7 @@
 
 ;; Getter Functions
 (define-read-only (get-balance (holder principal))
-    (ok (default-to u0 (map-get? balances {holder: holder}))))
+    (ok (default-to u0 (map-get? balances holder))))
 
 (define-read-only (get-unclaimed-dividends (holder principal) (snapshot-id uint))
     (ok (default-to u0 (map-get? dividends-earned {holder: holder, snapshot-id: snapshot-id}))))
